@@ -6,6 +6,7 @@ from ..common import _build
 from ..common.backend import get_cuda_version_key
 from ..common.build import is_hip
 from ..runtime.cache import get_cache_manager
+from .debugging import trace_func
 from .utils import generate_cu_signature
 
 # ----- stub --------
@@ -13,7 +14,7 @@ from .utils import generate_cu_signature
 
 def make_so_cache_key(version_hash, signature, constants, ids, **kwargs):
     # Get unique key for the compiled code
-    signature = {k: 'ptr' if v[0] == '*' else v for k, v in signature.items()}
+    signature = {k: "ptr" if v[0] == "*" else v for k, v in signature.items()}
     key = f"{version_hash}-{''.join(signature.values())}-{constants}-{ids}"
     for kw in kwargs:
         key = f"{key}-{kwargs.get(kw)}"
@@ -21,9 +22,12 @@ def make_so_cache_key(version_hash, signature, constants, ids, **kwargs):
     return key
 
 
+@trace_func
 def make_stub(name, signature, constants, ids, **kwargs):
     # name of files that are cached
-    so_cache_key = make_so_cache_key(get_cuda_version_key(), signature, constants, ids, **kwargs)
+    so_cache_key = make_so_cache_key(
+        get_cuda_version_key(), signature, constants, ids, **kwargs
+    )
     so_cache_manager = get_cache_manager(so_cache_key)
     so_name = f"{name}.so"
     # retrieve stub from cache if it exists
@@ -40,11 +44,12 @@ def make_stub(name, signature, constants, ids, **kwargs):
     else:
         return cache_path
 
+
 # ----- source code generation --------
 
 
 def ty_to_cpp(ty):
-    if ty[0] == '*':
+    if ty[0] == "*":
         return "hipDeviceptr_t" if is_hip() else "CUdeviceptr"
     return {
         "i1": "int32_t",
@@ -62,26 +67,27 @@ def ty_to_cpp(ty):
     }[ty]
 
 
+@trace_func
 def generate_launcher(constants, signature, ids):
     # Record the end of regular arguments;
     # subsequent arguments are architecture-specific descriptors, such as tensor descriptors for CUDA.
     signature, desc_start_idx = generate_cu_signature(constants, signature, ids)
-    arg_decls = ', '.join(f"{ty_to_cpp(ty)} arg{i}" for i, ty in signature.items())
+    arg_decls = ", ".join(f"{ty_to_cpp(ty)} arg{i}" for i, ty in signature.items())
 
     def _extracted_type(ty):
-        if ty[0] == '*':
+        if ty[0] == "*":
             return "PyObject*"
         return {
-            'i1': 'int32_t',
-            'i32': 'int32_t',
-            'i64': 'int64_t',
-            'u32': 'uint32_t',
-            'u64': 'uint64_t',
-            'fp16': 'float',
-            'bf16': 'float',
-            'fp32': 'float',
-            'f32': 'float',
-            'fp64': 'double',
+            "i1": "int32_t",
+            "i32": "int32_t",
+            "i64": "int64_t",
+            "u32": "uint32_t",
+            "u64": "uint64_t",
+            "fp16": "float",
+            "bf16": "float",
+            "fp32": "float",
+            "f32": "float",
+            "fp64": "double",
         }[ty]
 
     def format_of(ty):
@@ -96,11 +102,20 @@ def generate_launcher(constants, signature, ids):
             "int64_t": "L",
         }[ty]
 
-    format = "iiiiiiiiiKKOOO" + ''.join([format_of(_extracted_type(ty)) for ty in signature.values()])
+    format = "iiiiiiiiiKKOOO" + "".join(
+        [format_of(_extracted_type(ty)) for ty in signature.values()]
+    )
 
     # generate glue code
-    folded_without_constexprs = [c for c in ids['ids_of_folded_args'] if c not in ids['ids_of_const_exprs']]
-    params = [i for i in signature.keys() if i >= desc_start_idx or (i not in constants and i not in folded_without_constexprs)]
+    folded_without_constexprs = [
+        c for c in ids["ids_of_folded_args"] if c not in ids["ids_of_const_exprs"]
+    ]
+    params = [
+        i
+        for i in signature.keys()
+        if i >= desc_start_idx
+        or (i not in constants and i not in folded_without_constexprs)
+    ]
     src = f"""
 #include \"cuda.h\"
 #include <stdbool.h>
