@@ -439,6 +439,13 @@ class JITFunction(KernelInterface[T]):
 
         return device_types[0] if len(device_types) > 0 else "cuda"
 
+    def get_static_signature(self):
+        pass
+
+    def get_constants(self):
+        constants = {param.num: None for param in self.params if param.is_constexpr}
+        return constants
+
     def run(self, *args, **kwargs):
         from ..compiler import (
             CompiledKernel,
@@ -590,6 +597,42 @@ class JITFunction(KernelInterface[T]):
                 configs,
             ):
                 return None
+            from typing import Any, Dict
+
+            from dataclasses import dataclass
+
+            @dataclass
+            class CompileArgs(dict):
+                signature: Dict[int, str]
+                device: int
+                constants: dict[int, Any]
+                num_warps: int
+                num_ctas: int
+                num_stages: int
+                enable_warp_specialization: bool
+                enable_fp_fusion: bool
+                extern_libs: Dict[str, str]
+                configs: list
+                debug: bool
+                device_type: str
+
+                def __post_init__(self):
+                    self.update(self.__dict__)
+
+            self._compile_args = CompileArgs(
+                signature=signature,
+                device=device,
+                constants=constants,
+                num_warps=num_warps,
+                num_ctas=num_ctas,
+                num_stages=num_stages,
+                enable_warp_specialization=enable_warp_specialization,
+                enable_fp_fusion=enable_fp_fusion,
+                extern_libs=extern_libs,
+                configs=configs,
+                debug=self.debug,
+                device_type=device_type,
+            )
 
             self.cache[device][key] = compile(
                 self,
@@ -626,6 +669,103 @@ class JITFunction(KernelInterface[T]):
                 bin,
                 *bin.assemble_tensormap_to_arg(non_constexpr_arg_values),
             )
+
+        self._compile_args = CompileArgs(
+            signature=signature,
+            device=device,
+            constants=constants,
+            num_warps=num_warps,
+            num_ctas=num_ctas,
+            num_stages=num_stages,
+            enable_warp_specialization=enable_warp_specialization,
+            enable_fp_fusion=enable_fp_fusion,
+            extern_libs=extern_libs,
+            configs=configs,
+            debug=self.debug,
+            device_type=device_type,
+        )
+        self._compiled_obj = bin
+
+        def create_AOT_artifacts():
+            import binascii
+            from pathlib import Path
+
+            from triton.compiler.code_generator import kernel_suffix
+            from triton.compiler.make_launcher import ty_to_cpp
+
+            kernel = self.fn
+
+            ## Create AOT artifacts
+            def hash_signature(signature: List[str]):
+                m = hashlib.sha256()
+                m.update(" ".join(signature).encode())
+                return m.hexdigest()[:8]
+
+            meta_sig = f"warps{num_warps}xstages{num_stages}"
+            signature_str = [str(s) for s in signature.values()]
+            sig_hash = hash_signature(signature_str + [meta_sig])
+            const_sig = "x".join([str(v) for v in constants.values()])
+            doc_string = [
+                f"{kernel.arg_names[i]}={constants[i]}" for i in constants.keys()
+            ]
+            doc_string += [
+                f"num_warps={args.num_warps}",
+                f"num_stages={args.num_stages}",
+            ]
+
+            arg_names = []
+            arg_types = []
+            for i in signature.keys():
+                if i not in configs.equal_to_1:
+                    arg_names += [kernel.arg_names[i]]
+                    arg_types += [signature[i]]
+
+            # dump C stub code
+            suffix = kernel_suffix(signature.values(), configs)
+            func_name = "_".join([self.__name__, sig_hash, suffix])
+            triton_kernel_name = "_".join([args.kernel_name, suffix])
+            hex_ = str(binascii.hexlify(bin.asm["cubin"]))[2:-1]
+            params = {
+                "kernel_name": func_name,
+                "triton_kernel_name": triton_kernel_name,
+                "bin_size": len(hex_),
+                "bin_data": ", ".join(
+                    [f"0x{x}{y}" for x, y in zip(hex_[::2], hex_[1::2])]
+                ),
+                "signature": ", ".join(
+                    [
+                        f"{ty_to_cpp(ty)} {name}"
+                        for name, ty in zip(arg_names, arg_types)
+                    ]
+                ),
+                "full_signature": ", ".join(
+                    [
+                        f"{ty_to_cpp(signature[i])} {kernel.arg_names[i]}"
+                        for i in signature.keys()
+                    ]
+                ),
+                "arg_pointers": ", ".join([f"&{arg}" for arg in arg_names]),
+                "num_args": len(arg_names),
+                "kernel_docstring": doc_string,
+                "shared": bin.shared,
+                "num_warps": args.num_warps,
+                "algo_info": "_".join([const_sig, meta_sig]),
+                "gridX": grid[0],
+                "gridY": grid[1],
+                "gridZ": grid[2],
+                "_placeholder": "",
+            }
+            for ext in ["h", "c"]:
+                template_path = (
+                    Path(__file__).parent.parent / "tools" / f"compile.{ext}"
+                )
+                with Path("kernel").with_suffix(f".{sig_hash}_{suffix}.{ext}").open(
+                    "w"
+                ) as fp:
+                    fp.write(Path(template_path).read_text().format(**params))
+
+        create_AOT_artifacts()
+
         return bin
 
     def __init__(
