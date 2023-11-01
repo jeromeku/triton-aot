@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import torch
 
 import triton
 from triton.common import cuda_include_dir, libcuda_dirs
@@ -222,6 +223,132 @@ int main(int argc, char **argv) {{
     )
 
 
+def gen_add_test_bin(dir, N, kernel_name, kernel_lib_name=None, exe="test", algo_id=0):
+    headers = f"""
+#include <cuda.h>
+#include <stdio.h>
+#include <stdint.h>
+#include <string.h>
+#include <assert.h>
+#include "{kernel_name}.h"
+
+"""
+
+    test_utils_src = (
+        headers
+        + """
+static void write_buffer_to_csv(char *filename, float *buffer, int size) {
+    FILE *file = fopen(filename, "w");
+    if (file == NULL) {
+        printf("Could not open file %s\\n", filename);
+        return;
+    }
+    for (int i = 0; i < size; i++) {
+        fprintf(file, "%f", buffer[i]);
+        if (i < size - 1) {
+            fprintf(file, ",");
+        }
+    }
+    fclose(file);
+}
+
+static void read_csv_to_buffer(char *filename, float *buffer, int size) {
+    FILE *file = fopen(filename, "r");
+    if (file == NULL) {
+        printf("Could not open file %s\\n", filename);
+        return;
+    }
+    int index = 0;
+    while (fscanf(file, "%f,", &buffer[index]) != EOF && index < size) {
+        index++;
+    }
+    fclose(file);
+}"""
+    )
+
+    test_src = f"""
+int main(int argc, char **argv) {{
+  int N = {N};
+
+  // initialize CUDA handles
+  CUdevice dev;
+  CUcontext ctx;
+  CUstream stream;
+  CUdeviceptr x, y, out;
+  CUresult err = 0;
+  cuInit(0);
+  cuDeviceGet(&dev, 0);
+  cuCtxCreate(&ctx, 0, dev);
+  cuMemAlloc(&x, N);
+  cuMemAlloc(&y, N);
+  cuMemAlloc(&out, N);
+  cuStreamCreate(&stream, 0);
+  load_add_kernel();
+
+  // initialize input data
+  float hx[N];
+  float hy[N];
+  memset(hx, 0, N);
+  memset(hy, 0, N);
+  read_csv_to_buffer(argv[1], hx, N);
+  read_csv_to_buffer(argv[2], hy, N);
+  cuMemcpyHtoD(x, hx, N);
+  cuMemcpyHtoD(y, hy, N);
+
+  // launch kernel
+  cuStreamSynchronize(stream);
+  CUresult ret;
+  int algo_id = {algo_id};
+  if (algo_id == 0) {{
+    ret = add_kernel_default(stream, x, y, out, N);
+  }} else {{
+    ret = add_kernel(stream, x, y, out, N, {algo_id});
+  }}
+  if (ret != 0) fprintf(stderr, "kernel launch failed\\n");
+  assert(ret == 0);
+
+  cuStreamSynchronize(stream);
+
+  // read data
+  float hout[N];
+  memset(hout, 0, N);
+  cuMemcpyDtoH(hout, out, N);
+  write_buffer_to_csv(argv[3], hout, N);
+
+  // free cuda handles
+  unload_add_kernel();
+  cuMemFree(x);
+  cuMemFree(y);
+  cuMemFree(out);
+  cuCtxDestroy(ctx);
+}}
+"""
+    kernel_lib_name = kernel_lib_name or kernel_name
+    src = test_utils_src + test_src
+    with open(os.path.join(dir, f"{exe}.c"), "w") as file:
+        file.write(src)
+    subprocess.run(
+        ["gcc"]
+        + [
+            f"{exe}.c",
+            "-I",
+            cuda_include_dir(),
+            "-L",
+            libcuda_dirs()[0],
+            "-l",
+            "cuda",
+            "-L",
+            dir,
+            "-l",
+            kernel_lib_name,
+            "-o",
+            exe,
+        ],
+        check=True,
+        cwd=dir,
+    )
+
+
 def write_triton_kernels(dir, src, util_src):
     kernel_path = os.path.join(dir, "kernel.py")
     with open(kernel_path, "w") as file:
@@ -348,6 +475,13 @@ def generate_matmul_test_data(dir, M, N, K):
     return a, b, a_path, b_path, c_path
 
 
+def generate_test_data(dir, shape, dtype=np.float32):
+    x = np.random.randn(np.prod(shape)).astype(dtype).reshape(shape)
+    x_path = os.path.join(dir, "x.csv")
+    x.ravel().tofile(x_path, sep=",")
+    return x, x_path
+
+
 def test_compile_link_add():
     from pathlib import Path
 
@@ -356,14 +490,30 @@ def test_compile_link_add():
     torch.manual_seed(0)
     N = 98432
     kernel_dir = Path("aot_kernels").absolute()
-    kernel_dir.mkdir(exist_ok=True)
+    if kernel_dir.exists():
+        import shutil
+
+        shutil.rmtree(kernel_dir)
+
+    kernel_dir.mkdir(parents=True, exist_ok=True)
 
     kernel_path = write_tt_kernel(kernel_dir, add_kernel_src, "add_kernel.py")
     kernel_name = _find_kernel_name(kernel_path)
-    # compile_kernel_add(kernel_dir, kernel_path, N, name=kernel_name)
+    compile_kernel_add(kernel_dir, kernel_path, N, name=kernel_name)
     link_aot_kernels(kernel_dir, out_name=kernel_name)
 
-    # compile test case
+    gen_kernel_library(kernel_dir, f"lib{kernel_name}.so")
+    gen_add_test_bin(
+        kernel_dir,
+        N,
+        kernel_name=kernel_name,
+    )
+
+    # size = 98432
+    # data_dir = Path("test_data").absolute()
+    # x, x_path = generate_test_data(data_dir, (N,), dtype=np.float32)
+    # y, y_path = generate_test_data(data_dir, (N,), dtype=np.float32)
+    # expected = x + y
 
 
 def test_compile_link_matmul():
