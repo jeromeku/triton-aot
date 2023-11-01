@@ -267,7 +267,7 @@ def convert_type_repr(x):
     return x
 
 
-@trace_func
+# @trace_func
 def make_hash(fn, target, env_vars, device_backend, **kwargs):
     if device_backend is None:
         version_key = get_cuda_version_key()
@@ -405,7 +405,7 @@ def add_cuda_stages(target, extern_libs, stages):
     )
 
 
-@trace_func
+# @trace_func
 def compile(fn, **kwargs):
     # Get device type to decide which backend should be used
     device_type = kwargs.get("device_type", "cuda")
@@ -722,7 +722,7 @@ class CompiledKernel:
     launch_exit_hook = None
     tensormap_manager = TensorMapManager()
 
-    @trace_func
+    # @trace_func
     def __init__(self, fn, so_path, metadata, asm):
         # initialize launcher
         import importlib.util

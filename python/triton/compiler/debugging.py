@@ -16,10 +16,13 @@ def formatter(record):
     return "{extra[serialized]}\n"
 
 
+import sys
+
+logger.add(sys.stdout, format="{extra}")
 logger.add(
     "debug.log",
     level="DEBUG",
-    # format=formatter,
+    format="{extra}",  # formatter,
     backtrace=True,
     diagnose=True,
     serialize=True,
@@ -39,9 +42,9 @@ def trace_func(func):
     return wrapper
 
 
-@trace_func
-def add(a, b):
-    return a + b
+# @trace_func
+# def add(a, b):
+#     return a + b
 
 
-add(1, 2)
+# add(1, 2)

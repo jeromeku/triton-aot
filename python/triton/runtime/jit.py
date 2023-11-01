@@ -633,55 +633,72 @@ class JITFunction(KernelInterface[T]):
         do_not_specialize = do_not_specialize if do_not_specialize else []
         if isinstance(fn, str):
             # Parse str and filter for function definition
-            code = ast.parse(fn)
-            fns = [node for node in code if isinstance(node, ast.FunctionDef)]
-            assert len(fns) == 1, "Only one function definition is allowed"
-            fn_name = fns[0].name
-            # Get function from globals
-            # Create empty namespace
-            namespace = {}
-            # Execute code in namespace
-            exec(fn, namespace)
-            # extract function object
-            fn = namespace[fn_name]
-        else:
-            self.fn = fn
-            self.module = fn.__module__
-            self.version = version
-            self.signature = inspect.signature(fn)
+            import ast
+            import importlib.util
+            import inspect
+            import os
 
-            self.params = []
-            for i, param in enumerate(self.signature.parameters.values()):
-                dns = do_not_specialize and (
-                    i in do_not_specialize or param.name in do_not_specialize
-                )
-                self.params.append(KernelParam(i, param, dns))
+            # Load the temporary file as a module
+            assert os.path.exists(fn), f"File {fn} does not exist"
 
-            # function source code (without decorators)
-            self.src = textwrap.dedent(inspect.getsource(fn))
-            self.src = self.src[self.src.find("def") :]
-            # cache of just-in-time compiled kernels
-            self.cache = defaultdict(dict)
-            self.hash = None
-            # JITFunction can be instantiated as kernel
-            # when called with a grid using __getitem__
-            self.kernel = None
-            self.debug = True if os.environ.get("TRITON_DEBUG", "0") == "1" else debug
-            self.noinline = noinline
+            spec = importlib.util.spec_from_file_location("temp_module", fn)
+            temp_module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(temp_module)
 
-            # tma info
-            self.tensormaps_info = TMAInfos()
+            with open(fn, "r") as f:
+                tree = ast.parse(f.read())
+                fns = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+                assert len(fns) == 1, "Only one function definition is allowed"
 
-            # TODO(jlebar): Remove uses of these fields outside this file, then
-            # remove the fields here.
-            self.arg_names = [p.name for p in self.params]
-            self.constexprs = [p.num for p in self.params if p.is_constexpr]
+                fn_def = fns[0]
+                fn_name = fn_def.name
+                # Get function from globals
+                # Create empty namespace
+                # namespace = {}
+                # # Execute code in namespace
+                # exec(fn, namespace)
+                # extract function object
 
-            # re-use docs of wrapped function
-            self.__doc__ = fn.__doc__
-            self.__name__ = fn.__name__
-            self.__globals__ = fn.__globals__
-            self.__module__ = fn.__module__
+            fn = getattr(temp_module, fn_name)
+
+        self.fn = fn
+        self.src = textwrap.dedent(inspect.getsource(fn))
+        self.src = self.src[self.src.find("def") :]
+
+        self.module = fn.__module__
+        self.version = version
+        self.signature = inspect.signature(fn)
+
+        self.params = []
+        for i, param in enumerate(self.signature.parameters.values()):
+            dns = do_not_specialize and (
+                i in do_not_specialize or param.name in do_not_specialize
+            )
+            self.params.append(KernelParam(i, param, dns))
+
+        # function source code (without decorators)
+        # cache of just-in-time compiled kernels
+        self.cache = defaultdict(dict)
+        self.hash = None
+        # JITFunction can be instantiated as kernel
+        # when called with a grid using __getitem__
+        self.kernel = None
+        self.debug = True if os.environ.get("TRITON_DEBUG", "0") == "1" else debug
+        self.noinline = noinline
+
+        # tma info
+        self.tensormaps_info = TMAInfos()
+
+        # TODO(jlebar): Remove uses of these fields outside this file, then
+        # remove the fields here.
+        self.arg_names = [p.name for p in self.params]
+        self.constexprs = [p.num for p in self.params if p.is_constexpr]
+
+        # re-use docs of wrapped function
+        self.__doc__ = fn.__doc__
+        self.__name__ = fn.__name__
+        self.__globals__ = fn.__globals__
+        self.__module__ = fn.__module__
 
     @property
     def cache_key(self):

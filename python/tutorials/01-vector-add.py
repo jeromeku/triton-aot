@@ -24,7 +24,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+# @triton.jit
 def add_kernel(
     x_ptr,  # *Pointer* to first input vector.
     y_ptr,  # *Pointer* to second input vector.
@@ -107,17 +107,23 @@ def add(x: torch.Tensor, y: torch.Tensor):
 
 # %%
 # We can now use the above function to compute the element-wise sum of two `torch.tensor` objects and test its correctness:
+from triton.runtime.jit import JITFunction
 
-
+kernel_path = "/notebooks/Triton/triton/python/tutorials/vector_add_kernel.py"
 # add_kernel = triton.jit(add_kernel)
-
+add_kernel = JITFunction(kernel_path)  #
 
 torch.manual_seed(0)
 size = 98432
 x = torch.rand(size, device="cuda")
 y = torch.rand(size, device="cuda")
-# output_torch = x + y
+output_torch = x + y
 output_triton = add(x, y)
+
+from triton.compiler.debugging import logger
+
+with logger.contextualize(output_torch=output_torch, output_triton=output_triton):
+    logger.debug("Outputs")
 # print(output_torch)
 # print(output_triton)
 # print(
