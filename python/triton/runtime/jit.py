@@ -693,7 +693,8 @@ class JITFunction(KernelInterface[T]):
             from triton.compiler.code_generator import kernel_suffix
             from triton.compiler.make_launcher import ty_to_cpp
 
-            kernel = self.fn
+            kernel = self
+            config = configs[0]
 
             ## Create AOT artifacts
             def hash_signature(signature: List[str]):
@@ -709,21 +710,21 @@ class JITFunction(KernelInterface[T]):
                 f"{kernel.arg_names[i]}={constants[i]}" for i in constants.keys()
             ]
             doc_string += [
-                f"num_warps={args.num_warps}",
-                f"num_stages={args.num_stages}",
+                f"num_warps={num_warps}",
+                f"num_stages={num_stages}",
             ]
 
             arg_names = []
             arg_types = []
             for i in signature.keys():
-                if i not in configs.equal_to_1:
+                if i not in config.equal_to_1:
                     arg_names += [kernel.arg_names[i]]
                     arg_types += [signature[i]]
 
             # dump C stub code
-            suffix = kernel_suffix(signature.values(), configs)
+            suffix = kernel_suffix(signature.values(), config)
             func_name = "_".join([self.__name__, sig_hash, suffix])
-            triton_kernel_name = "_".join([args.kernel_name, suffix])
+            triton_kernel_name = "_".join([self.__name__, suffix])
             hex_ = str(binascii.hexlify(bin.asm["cubin"]))[2:-1]
             params = {
                 "kernel_name": func_name,
@@ -748,20 +749,20 @@ class JITFunction(KernelInterface[T]):
                 "num_args": len(arg_names),
                 "kernel_docstring": doc_string,
                 "shared": bin.shared,
-                "num_warps": args.num_warps,
+                "num_warps": num_warps,
                 "algo_info": "_".join([const_sig, meta_sig]),
-                "gridX": grid[0],
-                "gridY": grid[1],
-                "gridZ": grid[2],
+                "gridX": grid_0,
+                "gridY": grid_1,
+                "gridZ": grid_2,
                 "_placeholder": "",
             }
             for ext in ["h", "c"]:
                 template_path = (
                     Path(__file__).parent.parent / "tools" / f"compile.{ext}"
                 )
-                with Path("kernel").with_suffix(f".{sig_hash}_{suffix}.{ext}").open(
-                    "w"
-                ) as fp:
+                with Path(self.__name__).with_suffix(
+                    f".{sig_hash}_{suffix}.{ext}"
+                ).open("w") as fp:
                     fp.write(Path(template_path).read_text().format(**params))
 
         create_AOT_artifacts()
@@ -797,6 +798,9 @@ class JITFunction(KernelInterface[T]):
                 # extract function object
 
             fn = getattr(temp_module, fn_name)
+            if isinstance(fn, JITFunction):
+                self = fn
+                return
 
         self.fn = fn
         self.src = textwrap.dedent(inspect.getsource(fn))
