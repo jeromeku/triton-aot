@@ -317,13 +317,23 @@ def compile_aot_kernels(dir, kernel_path, dtype, BM, BN, BK, ha_hb_hints):
             )
 
 
-def link_aot_kernels(dir):
+def link_aot_kernels(dir, out_name="kernel"):
     linker_path = os.path.join(triton.tools.__path__[0], "link.py")
 
     # link all desired configs
     h_files = glob.glob(os.path.join(dir, "*.h"))
     subprocess.run(
-        [sys.executable, linker_path] + h_files + ["-o", "kernel"], check=True, cwd=dir
+        [sys.executable, linker_path] + h_files + ["-o", out_name], check=True, cwd=dir
+    )
+
+
+def _link_aot_kernels(dir, out_name):
+    linker_path = os.path.join(triton.tools.__path__[0], "link.py")
+
+    # link all desired configs
+    h_files = glob.glob(os.path.join(dir, "*.h"))
+    subprocess.run(
+        [sys.executable, linker_path] + h_files + ["-o", out_name], check=True, cwd=dir
     )
 
 
@@ -345,11 +355,13 @@ def test_compile_link_add():
 
     torch.manual_seed(0)
     N = 98432
-    kernel_dir = Path("aot_kernels")
+    kernel_dir = Path("aot_kernels").absolute()
     kernel_dir.mkdir(exist_ok=True)
 
     kernel_path = write_tt_kernel(kernel_dir, add_kernel_src, "add_kernel.py")
-    compile_kernel_add(kernel_dir, kernel_path, N)
+    kernel_name = _find_kernel_name(kernel_path)
+    # compile_kernel_add(kernel_dir, kernel_path, N, name=kernel_name)
+    link_aot_kernels(kernel_dir, out_name=kernel_name)
 
     # compile test case
 
