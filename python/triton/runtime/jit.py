@@ -3,6 +3,7 @@ from __future__ import annotations, division
 import ast
 import functools
 import hashlib
+import importlib.util
 import inspect
 import os
 import textwrap
@@ -633,10 +634,6 @@ class JITFunction(KernelInterface[T]):
         do_not_specialize = do_not_specialize if do_not_specialize else []
         if isinstance(fn, str):
             # Parse str and filter for function definition
-            import ast
-            import importlib.util
-            import inspect
-            import os
 
             # Load the temporary file as a module
             assert os.path.exists(fn), f"File {fn} does not exist"
