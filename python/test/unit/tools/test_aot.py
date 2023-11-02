@@ -223,7 +223,31 @@ int main(int argc, char **argv) {{
     )
 
 
-def gen_add_test_bin(dir, N, kernel_name, kernel_lib_name=None, exe="test", algo_id=0):
+def gen_add_test_bin(
+    dir,
+    N,
+    kernel_name,
+    dtype_in,
+    dtype_out,
+    kernel_lib_name=None,
+    exe="test",
+    algo_id=0,
+):
+    if "16" in dtype_in:
+        num_bytes_in = 2
+        in_fmt_str = "%hd"
+    elif "32" in dtype_in:
+        num_bytes_in = 4
+        in_fmt_str = "%d"
+
+    if "16" in dtype_out:
+        num_bytes_out = 2
+        out_fmt_str = "%hd"
+
+    elif "32" in dtype_out:
+        num_bytes_out = 4
+        out_fmt_str = "%d"
+
     headers = f"""
 #include <cuda.h>
 #include <stdio.h>
@@ -237,7 +261,7 @@ def gen_add_test_bin(dir, N, kernel_name, kernel_lib_name=None, exe="test", algo
     test_utils_src = (
         headers
         + """
-static void write_buffer_to_csv(char *filename, float *buffer, int size) {
+static void write_buffer_to_csv(char *filename, {dtype_out} *buffer, int size) {
     FILE *file = fopen(filename, "w");
     if (file == NULL) {
         printf("Could not open file %s\\n", filename);
@@ -245,8 +269,7 @@ static void write_buffer_to_csv(char *filename, float *buffer, int size) {
     }
     printf("Writing to %s\\n", filename);
     for (int i = 0; i < size; i++) {
-        fprintf(file, "%f", buffer[i]);
-        printf("%f\\n", buffer[i]);
+        fprintf(file, "{out_fmt_str}", buffer[i]);
         if (i < size - 1) {
             fprintf(file, ",");
         }
@@ -254,7 +277,7 @@ static void write_buffer_to_csv(char *filename, float *buffer, int size) {
     fclose(file);
 }
 
-static void read_csv_to_buffer(char *filename, float *buffer, int size) {
+static void read_csv_to_buffer(char *filename, {dtype_in} *buffer, int size) {
     FILE *file = fopen(filename, "r");
     if (file == NULL) {
         printf("Could not open file %s\\n", filename);
@@ -262,12 +285,16 @@ static void read_csv_to_buffer(char *filename, float *buffer, int size) {
     }
     int index = 0;
     printf("Reading from %s\\n", filename);
-    while (fscanf(file, "%f,", &buffer[index]) != EOF && index < size) {
-        printf("%f\\n", buffer[index]);
+    while (fscanf(file, "{in_fmt_str},", &buffer[index]) != EOF && index < size) {
         index++;
     }
     fclose(file);
-}"""
+}""".format(
+            in_fmt_str=in_fmt_str,
+            out_fmt_str=out_fmt_str,
+            dtype_in=dtype_in,
+            dtype_out=dtype_out,
+        )
     )
 
     test_src = f"""
@@ -290,14 +317,14 @@ int main(int argc, char **argv) {{
   load_add_kernel();
 
   // initialize input data
-  float hx[N];
-  float hy[N];
-  memset(hx, 0, N);
-  memset(hy, 0, N);
+  int16_t hx[N];
+  int16_t hy[N];
+  memset(hx, 0, N * {num_bytes_in});
+  memset(hy, 0, N * {num_bytes_in});
   read_csv_to_buffer(argv[1], hx, N);
   read_csv_to_buffer(argv[2], hy, N);
-  cuMemcpyHtoD(x, hx, N);
-  cuMemcpyHtoD(y, hy, N);
+  cuMemcpyHtoD(x, hx, N * {num_bytes_in});
+  cuMemcpyHtoD(y, hy, N * {num_bytes_in});
 
   // launch kernel
   cuStreamSynchronize(stream);
@@ -314,7 +341,7 @@ int main(int argc, char **argv) {{
   cuStreamSynchronize(stream);
 
   // read data
-  float hout[N];
+  int16_t hout[N];
   memset(hout, 0, N);
   cuMemcpyDtoH(hout, out, N);
   write_buffer_to_csv(argv[3], hout, N);
@@ -383,13 +410,26 @@ def _find_kernel_name(kernel_path):
     return fns[0].name
 
 
+def _dtype_map(ty):
+    return {np.int16: "i16", np.int32: "i32", np.float16: "fp16", np.float32: "fp32"}[
+        ty
+    ]
+
+
 def compile_kernel_add(
-    dir, kernel_path, N, BLOCK_SIZE=1024, name=None, num_warps=1, specializations=None
+    dir,
+    kernel_path,
+    N,
+    dtype=np.float16,
+    BLOCK_SIZE=1024,
+    name=None,
+    num_warps=1,
+    specializations=None,
 ):
     compiler_path = os.path.join(triton.tools.__path__[0], "compile.py")
     # x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr
 
-    sig = f"*fp32, *fp32, *fp32, i32, {BLOCK_SIZE}"
+    sig = f"*{_dtype_map(dtype)}, *{_dtype_map(dtype)}, *{_dtype_map(dtype)}, i32, {BLOCK_SIZE}"
     name = name or _find_kernel_name(kernel_path)
     grid = f"N/{BLOCK_SIZE}, 1, 1"
     num_warps = str(num_warps)
@@ -486,10 +526,10 @@ def generate_test_data(dir, shape, file_name, dtype=np.float32, seed=0, ext="csv
     return x, x_path
 
 
-def generate_dummy_data(dir, shape, file_name, dtype=np.float32, seed=0, ext="csv"):
+def generate_dummy_data(dir, shape, file_name, dtype=np.float16, seed=0, ext="csv"):
     x = np.ones(np.prod(shape)).astype(dtype).reshape(shape)
     x_path = os.path.join(dir, f"{file_name}.{ext}")
-    x.ravel().tofile(x_path, sep=",")
+    x.view(np.int16).ravel().tofile(x_path, sep=",")
     return x, x_path
 
 
@@ -507,14 +547,21 @@ def test_compile_link_add():
     from pathlib import Path
 
     N = 1024
+    BLOCK_SIZE = 1024
     NUM_WARPS = 4
     kernel_dir = Path("aot_kernels").absolute()
     check_dir(kernel_dir)
-
+    dtype = np.int16
     kernel_path = write_tt_kernel(kernel_dir, add_kernel_src, "add_kernel.py")
     kernel_name = _find_kernel_name(kernel_path)
     compile_kernel_add(
-        kernel_dir, kernel_path, N, name=kernel_name, num_warps=NUM_WARPS
+        kernel_dir,
+        kernel_path,
+        N,
+        name=kernel_name,
+        dtype=dtype,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=NUM_WARPS,
     )
     link_aot_kernels(kernel_dir, out_name=kernel_name)
     executable_name = "test"
@@ -532,12 +579,8 @@ def test_compile_link_add():
     check_dir(data_dir)
 
     data_generator = generate_dummy_data
-    x, x_path = data_generator(
-        data_dir, (N,), file_name="x", seed=seed, dtype=np.float32
-    )
-    y, y_path = data_generator(
-        data_dir, (N,), file_name="y", seed=seed, dtype=np.float32
-    )
+    x, x_path = data_generator(data_dir, (N,), file_name="x", seed=seed, dtype=dtype)
+    y, y_path = data_generator(data_dir, (N,), file_name="y", seed=seed, dtype=dtype)
     out_path = os.path.join(data_dir, "out.csv")
     expected = x + y
     # print(f"EXPECTED: {expected}")
@@ -554,7 +597,7 @@ def test_compile_link_add():
     )
 
     # read data and compare against reference
-    actual = np.genfromtxt(out_path, delimiter=",", dtype=np.float32)
+    actual = np.genfromtxt(out_path, delimiter=",", dtype=dtype)
     EXPECTED_VAL = 2.0
 
     def compute_stats(x):
@@ -703,4 +746,5 @@ module attributes {"triton_gpu.num-warps" = 4 : i32, "triton_gpu.threads-per-war
         k = triton.compile(kernel_path, cc=80)
         ptx = k.asm["ptx"]
         assert ".target sm_80" in ptx
+        assert ".address_size 64" in ptx
         assert ".address_size 64" in ptx
