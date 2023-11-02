@@ -547,7 +547,7 @@ def test_compile_link_add():
     NUM_WARPS = 4
     kernel_dir = Path("aot_kernels").absolute()
     check_dir(kernel_dir)
-    dtype = np.int16
+    dtype = np.float16
 
     kernel_path = write_tt_kernel(kernel_dir, add_kernel_src, "add_kernel.py")
     kernel_name = _find_kernel_name(kernel_path)
@@ -562,7 +562,22 @@ def test_compile_link_add():
     )
     link_aot_kernels(kernel_dir, out_name=kernel_name)
 
-    dtype_in = dtype_out = "int16_t"  # ty_to_cpp(_dtype_map(dtype))
+    type_converter = {
+        "i1": "int32_t",
+        "i8": "int8_t",
+        "i16": "int16_t",
+        "i32": "int32_t",
+        "i64": "int64_t",
+        "u32": "uint32_t",
+        "u64": "uint64_t",
+        "fp16": "int16_t",
+        "bf16": "int16_t",
+        "fp32": "int32_t",
+        "f32": "int16_t",
+        "fp64": "int64_t",
+    }
+
+    dtype_in = dtype_out = type_converter[(_dtype_map(dtype))]
     print("dtype_in: ", dtype_in)
 
     executable_name = "test"
@@ -600,7 +615,14 @@ def test_compile_link_add():
     )
 
     # read data and compare against reference
-    actual = np.genfromtxt(out_path, delimiter=",", dtype=dtype)
+    if dtype == np.float16:
+        conversion_type = np.int16
+    elif dtype == np.float32:
+        conversion_type = np.int32
+    else:
+        conversion_type = dtype
+
+    actual = np.genfromtxt(out_path, delimiter=",", dtype=conversion_type)
     EXPECTED_VAL = 2.0
 
     def compute_stats(x):
