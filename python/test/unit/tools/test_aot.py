@@ -10,6 +10,7 @@ import pytest
 
 import triton
 from triton.common import cuda_include_dir, libcuda_dirs
+from triton.compiler.make_launcher import ty_to_cpp
 
 add_kernel_src = """
 import triton
@@ -247,7 +248,8 @@ def gen_add_test_bin(
     elif "32" in dtype_out:
         num_bytes_out = 4
         out_fmt_str = "%d"
-
+    print("num_bytes_in: ", num_bytes_in)
+    print("in_fmt_str: ", in_fmt_str)
     headers = f"""
 #include <cuda.h>
 #include <stdio.h>
@@ -258,45 +260,38 @@ def gen_add_test_bin(
 
 """
 
-    test_utils_src = (
-        headers
-        + """
-static void write_buffer_to_csv(char *filename, {dtype_out} *buffer, int size) {
-    FILE *file = fopen(filename, "w");
-    if (file == NULL) {
-        printf("Could not open file %s\\n", filename);
-        return;
-    }
-    printf("Writing to %s\\n", filename);
-    for (int i = 0; i < size; i++) {
-        fprintf(file, "{out_fmt_str}", buffer[i]);
-        if (i < size - 1) {
-            fprintf(file, ",");
-        }
-    }
-    fclose(file);
-}
+    utils_src = f"""
+static void write_buffer_to_csv(char *filename, {dtype_out} *buffer, int size) {{
+   FILE *file = fopen(filename, "w");
+   if (file == NULL) {{
+       printf("Could not open file %s\\n", filename);
+       return;
+   }}
+   printf("Writing to %s\\n", filename);
+   for (int i = 0; i < size; i++) {{
+       fprintf(file, "{out_fmt_str}", buffer[i]);
+       if (i < size - 1) {{
+           fprintf(file, ",");
+       }}
+   }}
+   fclose(file);
+}}
 
-static void read_csv_to_buffer(char *filename, {dtype_in} *buffer, int size) {
-    FILE *file = fopen(filename, "r");
-    if (file == NULL) {
-        printf("Could not open file %s\\n", filename);
-        return;
-    }
-    int index = 0;
-    printf("Reading from %s\\n", filename);
-    while (fscanf(file, "{in_fmt_str},", &buffer[index]) != EOF && index < size) {
-        index++;
-    }
-    fclose(file);
-}""".format(
-            in_fmt_str=in_fmt_str,
-            out_fmt_str=out_fmt_str,
-            dtype_in=dtype_in,
-            dtype_out=dtype_out,
-        )
-    )
-
+static void read_csv_to_buffer(char *filename, {dtype_in} *buffer, int size) {{
+   FILE *file = fopen(filename, "r");
+   if (file == NULL) {{
+       printf("Could not open file %s\\n", filename);
+       return;
+   }}
+   int index = 0;
+   printf("Reading from %s\\n", filename);
+   while (fscanf(file, "{in_fmt_str},", &buffer[index]) != EOF && index < size) {{
+       index++;
+   }}
+   fclose(file);
+}}
+"""
+    test_utils_src = headers + utils_src
     test_src = f"""
 int main(int argc, char **argv) {{
   int N = {N};
@@ -310,15 +305,15 @@ int main(int argc, char **argv) {{
   cuInit(0);
   cuDeviceGet(&dev, 0);
   cuCtxCreate(&ctx, 0, dev);
-  cuMemAlloc(&x, N);
-  cuMemAlloc(&y, N);
-  cuMemAlloc(&out, N);
+  cuMemAlloc(&x, N * {num_bytes_in});
+  cuMemAlloc(&y, N * {num_bytes_in});
+  cuMemAlloc(&out, N * {num_bytes_out});
   cuStreamCreate(&stream, 0);
   load_add_kernel();
 
   // initialize input data
-  int16_t hx[N];
-  int16_t hy[N];
+  {dtype_in} hx[N];
+  {dtype_in} hy[N];
   memset(hx, 0, N * {num_bytes_in});
   memset(hy, 0, N * {num_bytes_in});
   read_csv_to_buffer(argv[1], hx, N);
@@ -341,9 +336,9 @@ int main(int argc, char **argv) {{
   cuStreamSynchronize(stream);
 
   // read data
-  int16_t hout[N];
-  memset(hout, 0, N);
-  cuMemcpyDtoH(hout, out, N);
+  {dtype_out} hout[N];
+  memset(hout, 0, N * {num_bytes_out});
+  cuMemcpyDtoH(hout, out, N * {num_bytes_out});    
   write_buffer_to_csv(argv[3], hout, N);
 
   // free cuda handles
@@ -430,6 +425,7 @@ def compile_kernel_add(
     # x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr
 
     sig = f"*{_dtype_map(dtype)}, *{_dtype_map(dtype)}, *{_dtype_map(dtype)}, i32, {BLOCK_SIZE}"
+    print("SIGNATURE: ", sig)
     name = name or _find_kernel_name(kernel_path)
     grid = f"N/{BLOCK_SIZE}, 1, 1"
     num_warps = str(num_warps)
@@ -552,6 +548,7 @@ def test_compile_link_add():
     kernel_dir = Path("aot_kernels").absolute()
     check_dir(kernel_dir)
     dtype = np.int16
+
     kernel_path = write_tt_kernel(kernel_dir, add_kernel_src, "add_kernel.py")
     kernel_name = _find_kernel_name(kernel_path)
     compile_kernel_add(
@@ -564,11 +561,17 @@ def test_compile_link_add():
         num_warps=NUM_WARPS,
     )
     link_aot_kernels(kernel_dir, out_name=kernel_name)
+
+    dtype_in = dtype_out = "int16_t"  # ty_to_cpp(_dtype_map(dtype))
+    print("dtype_in: ", dtype_in)
+
     executable_name = "test"
     gen_kernel_library(kernel_dir, f"lib{kernel_name}.so")
     gen_add_test_bin(
         kernel_dir,
         N,
+        dtype_in=dtype_in,
+        dtype_out=dtype_out,
         kernel_name=kernel_name,
         exe=executable_name,
     )
