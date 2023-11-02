@@ -114,9 +114,10 @@ kernel_path = "/notebooks/Triton/triton/python/tutorials/vector_add_kernel.py"
 add_kernel = JITFunction(kernel_path)  #
 
 torch.manual_seed(0)
-size = 98432
-x = torch.rand(size, device="cuda")
-y = torch.rand(size, device="cuda")
+size = 1024
+dtype = torch.float32
+x = torch.ones(size, dtype=dtype, device="cuda")  # torch.rand(size, device="cuda")
+y = torch.ones(size, dtype=dtype, device="cuda")
 output_torch = x + y
 output_triton = add(x, y)
 

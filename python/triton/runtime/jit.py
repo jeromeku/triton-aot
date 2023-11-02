@@ -686,6 +686,10 @@ class JITFunction(KernelInterface[T]):
         )
         self._compiled_obj = bin
 
+        from triton.compiler.debugging import logger
+
+        logger.bind(COMPILE_ARGS=self._compile_args).debug("COMPILE_ARGS")
+
         def create_AOT_artifacts():
             import binascii
             from pathlib import Path
@@ -756,6 +760,7 @@ class JITFunction(KernelInterface[T]):
                 "gridZ": grid_2,
                 "_placeholder": "",
             }
+            logger.bind(PARAMS=params).debug("AOT PARAMS")
             for ext in ["h", "c"]:
                 template_path = (
                     Path(__file__).parent.parent / "tools" / f"compile.{ext}"

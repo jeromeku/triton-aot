@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
-import torch
+import pytest
 
 import triton
 from triton.common import cuda_include_dir, libcuda_dirs
@@ -243,8 +243,10 @@ static void write_buffer_to_csv(char *filename, float *buffer, int size) {
         printf("Could not open file %s\\n", filename);
         return;
     }
+    printf("Writing to %s\\n", filename);
     for (int i = 0; i < size; i++) {
         fprintf(file, "%f", buffer[i]);
+        printf("%f\\n", buffer[i]);
         if (i < size - 1) {
             fprintf(file, ",");
         }
@@ -259,7 +261,9 @@ static void read_csv_to_buffer(char *filename, float *buffer, int size) {
         return;
     }
     int index = 0;
+    printf("Reading from %s\\n", filename);
     while (fscanf(file, "%f,", &buffer[index]) != EOF && index < size) {
+        printf("%f\\n", buffer[index]);
         index++;
     }
     fclose(file);
@@ -380,7 +384,7 @@ def _find_kernel_name(kernel_path):
 
 
 def compile_kernel_add(
-    dir, kernel_path, N, BLOCK_SIZE=1024, name=None, specializations=None
+    dir, kernel_path, N, BLOCK_SIZE=1024, name=None, num_warps=1, specializations=None
 ):
     compiler_path = os.path.join(triton.tools.__path__[0], "compile.py")
     # x_ptr, y_ptr, out_ptr, N, BLOCK_SIZE: tl.constexpr
@@ -388,7 +392,7 @@ def compile_kernel_add(
     sig = f"*fp32, *fp32, *fp32, i32, {BLOCK_SIZE}"
     name = name or _find_kernel_name(kernel_path)
     grid = f"N/{BLOCK_SIZE}, 1, 1"
-
+    num_warps = str(num_warps)
     subprocess.run(
         [
             sys.executable,
@@ -402,7 +406,7 @@ def compile_kernel_add(
             "-o",
             name,
             "-w",
-            "1",
+            num_warps,
             "-g",
             grid,
             kernel_path,
@@ -475,45 +479,92 @@ def generate_matmul_test_data(dir, M, N, K):
     return a, b, a_path, b_path, c_path
 
 
-def generate_test_data(dir, shape, dtype=np.float32):
+def generate_test_data(dir, shape, file_name, dtype=np.float32, seed=0, ext="csv"):
     x = np.random.randn(np.prod(shape)).astype(dtype).reshape(shape)
-    x_path = os.path.join(dir, "x.csv")
+    x_path = os.path.join(dir, f"{file_name}.{ext}")
     x.ravel().tofile(x_path, sep=",")
     return x, x_path
+
+
+def generate_dummy_data(dir, shape, file_name, dtype=np.float32, seed=0, ext="csv"):
+    x = np.ones(np.prod(shape)).astype(dtype).reshape(shape)
+    x_path = os.path.join(dir, f"{file_name}.{ext}")
+    x.ravel().tofile(x_path, sep=",")
+    return x, x_path
+
+
+def check_dir(dir):
+    if os.path.exists(dir):
+        import shutil
+
+        shutil.rmtree(dir)
+
+    os.makedirs(dir)
+    return dir
 
 
 def test_compile_link_add():
     from pathlib import Path
 
-    import torch
-
-    torch.manual_seed(0)
-    N = 98432
+    N = 1024
+    NUM_WARPS = 4
     kernel_dir = Path("aot_kernels").absolute()
-    if kernel_dir.exists():
-        import shutil
-
-        shutil.rmtree(kernel_dir)
-
-    kernel_dir.mkdir(parents=True, exist_ok=True)
+    check_dir(kernel_dir)
 
     kernel_path = write_tt_kernel(kernel_dir, add_kernel_src, "add_kernel.py")
     kernel_name = _find_kernel_name(kernel_path)
-    compile_kernel_add(kernel_dir, kernel_path, N, name=kernel_name)
+    compile_kernel_add(
+        kernel_dir, kernel_path, N, name=kernel_name, num_warps=NUM_WARPS
+    )
     link_aot_kernels(kernel_dir, out_name=kernel_name)
-
+    executable_name = "test"
     gen_kernel_library(kernel_dir, f"lib{kernel_name}.so")
     gen_add_test_bin(
         kernel_dir,
         N,
         kernel_name=kernel_name,
+        exe=executable_name,
     )
 
-    # size = 98432
-    # data_dir = Path("test_data").absolute()
-    # x, x_path = generate_test_data(data_dir, (N,), dtype=np.float32)
-    # y, y_path = generate_test_data(data_dir, (N,), dtype=np.float32)
-    # expected = x + y
+    # Generate test data
+    seed = 0
+    data_dir = Path("test_data").absolute()
+    check_dir(data_dir)
+
+    data_generator = generate_dummy_data
+    x, x_path = data_generator(
+        data_dir, (N,), file_name="x", seed=seed, dtype=np.float32
+    )
+    y, y_path = data_generator(
+        data_dir, (N,), file_name="y", seed=seed, dtype=np.float32
+    )
+    out_path = os.path.join(data_dir, "out.csv")
+    expected = x + y
+    # print(f"EXPECTED: {expected}")
+
+    # run test case
+    env = os.environ.copy()
+    env["LD_LIBRARY_PATH"] = kernel_dir
+
+    subprocess.run(
+        [f"./{executable_name}", x_path, y_path, out_path],
+        env=env,
+        check=True,
+        cwd=kernel_dir,
+    )
+
+    # read data and compare against reference
+    actual = np.genfromtxt(out_path, delimiter=",", dtype=np.float32)
+    EXPECTED_VAL = 2.0
+
+    def compute_stats(x):
+        actual_counts = np.isclose(x, EXPECTED_VAL).sum()
+        return actual_counts
+
+    print(f"ACTUAL counts: {compute_stats(actual)}")
+
+    # c_ref = np.matmul(a.astype(np.float32), b.astype(np.float32))
+    # np.testing.assert_allclose(c_tri, c_ref * c_ref, atol=1e-4, rtol=0.0)
 
 
 def test_compile_link_matmul():

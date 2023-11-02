@@ -18,11 +18,11 @@ def formatter(record):
 
 import sys
 
-logger.add(sys.stdout, format="{extra}")
+logger.add(sys.stdout)
 logger.add(
     "debug.log",
     level="DEBUG",
-    format="{extra}",  # formatter,
+    # format="{extra}",  # formatter,
     backtrace=True,
     diagnose=True,
     serialize=True,
